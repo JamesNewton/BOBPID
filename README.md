@@ -5,3 +5,6 @@ The goal here was to provide a useful servo driver at very low cost (blank PIC 1
 
 Instructions, PCB, kit, etc... all at:
 http://techref.massmind.org/techref/io/SERVO/BOBPID.htm
+
+Quick video of it running from a 3D printer RAMPS/Marlin controller:
+https://www.youtube.com/watch?v=rnwYqGB3bXw
