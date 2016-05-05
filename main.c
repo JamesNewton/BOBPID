@@ -105,7 +105,7 @@
 void hi_interrupt(void);
 void lo_interrupt(void);
 
-#define BOOTLOADER
+//#define BOOTLOADER
 /*To enable the bootloader, 
 Find \src\traditional\startup\c018i.c, make local copy, add to project
 Edit as follows:
