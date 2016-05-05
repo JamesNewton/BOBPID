@@ -17,6 +17,8 @@
 // [ ] Test / debug (run to position at speed)
 // [X] Add PID term non-volatile storage
 // [X] Add Parameter for polarity of direction
+// [X] Support bootloader for firmware upgrades.
+//     http://picprog.strongedge.net/bootloader/bootloader.html
 // [ ] Add LCD user interface?
 //     Problem with LCD interface: We don't control X DIR input
 //      which is also used by LCD as a data line.
@@ -45,8 +47,11 @@
 #define ERROR_OFF 0
 
 #define	PID_KP_START 20
-#define	PID_KI_START 0.2
-#define	PID_KD_START 120
+#define	PID_KI_START 0.4
+#define	PID_KD_START 50
+#define EEPROM_VERSION '1'
+//change when layout of EEPROM data changes so that new code updates
+//don't cause garbled data.
 
 #define SAMPLE_TIME .005	//Seconds
 #define SAMPLE_FREQ (1/SAMPLE_TIME) //Hz
@@ -100,14 +105,71 @@
 void hi_interrupt(void);
 void lo_interrupt(void);
 
+#define BOOTLOADER
+/*To enable the bootloader, 
+Find \src\traditional\startup\c018i.c, make local copy, add to project
+Edit as follows:
+
+//#pragma code _entry_scn=0x000000
+//void
+//_entry (void)
+//{
+//_asm goto _startup _endasm
+//}
+//removed inorder to support.
+//http://picprog.strongedge.net/bootloader/bootloader.html
+
+Find \bin\LKR\18f14k22_g.lkr, make local copy, add to project
+Edit as follows:
+
+#IFDEF _CRUNTIME
+  #IFDEF _EXTENDEDMODE
+#error Make custom c018i_e.c file as per c018i.c below.
+    FILES c018i_e.o
+    FILES clib_e.lib
+    FILES p18f14k22_e.lib
+
+  #ELSE
+//    FILES c018i.o
+//Removed because we have a local custom ver in order to support 
+//http://picprog.strongedge.net/bootloader/bootloader.html
+    FILES clib.lib
+    FILES p18f14k22.lib
+  #FI
+
+#FI
+
+
+*/
+
+#ifdef BOOTLOADER
+extern void _startup (void);
+#pragma code _entry=0x00
+void
+_entry (void)
+{
+_asm 
+	goto _startup 
+	goto _startup 
+high_vector:
+	GOTO hi_interrupt
+_endasm
+	}
+
+#else
 #pragma code high_vector_section=0x8
 void high_vector (void){
 	_asm GOTO hi_interrupt _endasm
 	}
+#endif
+
+
 #pragma code low_vector_section=0x18
 void low_vector(void){
 	_asm GOTO lo_interrupt _endasm
 	}
+
+
 #pragma code
 
 #ifdef THROTTLE
@@ -115,6 +177,8 @@ unsigned char encoder_counter=0; //where we are
 #endif
 
 #ifdef PID_POS
+void ComputePID();
+
 double Setpoint=0; //where we want to be
 double encoder_counter=0; //where we are
 
@@ -297,7 +361,7 @@ void lo_interrupt(void){
 
 /**** COMPUTE OUTPUT VIA PID ****/
 //http://brettbeauregard.com/blog/2011/04/improving-the-beginners-pid-direction/
-double ComputePID() {
+void ComputePID() {
 	
       /*Compute PID Output*/
       PIDOutput = constrain(
@@ -308,9 +372,7 @@ double ComputePID() {
       	0-PWM_MAX, //minimum is negative max because direction
       	PWM_MAX
       	);
- 
-      return PIDOutput;
-	}
+ 	}
 
 #endif
 
@@ -556,7 +618,7 @@ reconfigure the pin from input to output, as needed." */
 	/**** INITIALIZE PID ****/
 
 	//try EEPROM
-	if ('p'==Read_EEPROM(0) ) {
+	if (EEPROM_VERSION==Read_EEPROM(0) ) {
 		Flags.byte = Read_EEPROM(1);
 		PIDkp = Read_Double_EEPROM(2 + (0*sizeof(double)));
 		PIDki = Read_Double_EEPROM(2 + (1*sizeof(double)));
@@ -582,7 +644,7 @@ reconfigure the pin from input to output, as needed." */
 				PIDerror = Setpoint - encoder_counter;
 				}
 			else if ('e'==cmd) { //enable motor
-				PIDlastInput = encoder_counter; //avoid startup bump
+				encoder_counter = Setpoint; //We want to be where we start
 				MOTOR_ENABLE = 1;
 				}
 			else if (' '==cmd) { //disable motor
@@ -607,11 +669,11 @@ reconfigure the pin from input to output, as needed." */
 //				}
 			else if ('w'==cmd && 321==val) { //save parms
 				//TODO: let the user know they need to enter 321w
-				Write_EEPROM(0,Flags.byte); //Save flags
+				Write_EEPROM(1,Flags.byte); //Save flags
 				Write_Double_EEPROM(2 + (0*sizeof(double)),PIDkp);
 				Write_Double_EEPROM(2 + (1*sizeof(double)),PIDki);
 				Write_Double_EEPROM(2 + (2*sizeof(double)),PIDkd);
-				Write_EEPROM(0,'p'); //flag the EEPROM
+				Write_EEPROM(0,EEPROM_VERSION); //flag the EEPROM
 				}
 			else if ('w'==cmd && 216==val) { //direction high
 				Flags.dir = 1;
