@@ -19,13 +19,15 @@
 // [X] Add Parameter for polarity of direction
 // [X] Support bootloader for firmware upgrades.
 //     http://picprog.strongedge.net/bootloader/bootloader.html
+// [ ] use enable from step direction input.
 // [ ] Add LCD user interface?
 //     Problem with LCD interface: We don't control X DIR input
 //      which is also used by LCD as a data line.
-// [ ] use enable from step direction input.
 // [ ] Add demo mode
 // [ ] Add status reply to "?" command
 // [ ] Add autotune mode with status output
+
+#define VERSION_STRING "0.91"
 
 #define MOTOR_ENABLE LATCbits.LATC7  	//Enables Motor Driver
 #define MOTOR_DIRECTION LATAbits.LATA4	//Sets Motor Direction
@@ -38,7 +40,7 @@
 
 #define INPUT_STEP PORTAbits.RA1		//Step input (must be INT1)
 #define INPUT_DIRECTION PORTCbits.RC0	//which direction do we step?
-#define INPUT_ENABLE PORTBbits.RB6		//
+#define INPUT_ENABLE (!PORTBbits.RB6)	//! assumes active low enable
 #define INPUT_STEP_SIZE 2				//how much do we step?
 #define ERROR_STATUS LATAbits.LATA2		//A2 jumper to Xerr/LED on J12
 // J12 pin 3 anode, pin 2 cathode bridge to pin 1 330R to GND J11 pin 5
@@ -49,7 +51,7 @@
 #define	PID_KP_START 20
 #define	PID_KI_START 0.4
 #define	PID_KD_START 50
-#define EEPROM_VERSION '1'
+#define EEPROM_VERSION '2'
 //change when layout of EEPROM data changes so that new code updates
 //don't cause garbled data.
 
@@ -66,7 +68,8 @@
 #define OSC_FREQ 16000000L	
 //Max 16 MHz in standard modes.
 //Up to 64M available with extra PLL setup.
-#define BAUD_RATE 9600
+//#define BAUD_RATE 9600
+#define BAUD_RATE 38400
 
 //#define THROTTLE
 /* Use THROTTLE for simple (working tested) throttle control
@@ -195,6 +198,7 @@ double PIDOutput;	//output
 typedef union {
  struct {
   unsigned dir:1;
+  unsigned inputEnable:1;
   };
  unsigned char byte; 
  } T_Flags;
@@ -434,6 +438,15 @@ unsigned char Write_Double_EEPROM(unsigned char address, double data) {
 		}
 	return sizeof(double);
 	}
+	
+void puts_lit(const rom char *zstr) {
+	while(*zstr) {
+		while (!PIR1bits.TXIF)
+    	    ;
+    	TXREG = *zstr;
+    	zstr++;
+    	}
+	}
 
 void main(void) {
 #if OSC_FREQ == 16000000L
@@ -624,12 +637,17 @@ reconfigure the pin from input to output, as needed." */
 		PIDki = Read_Double_EEPROM(2 + (1*sizeof(double)));
 		PIDkd = Read_Double_EEPROM(2 + (2*sizeof(double)));
 		}
-	else {
-		Flags.dir = 1;
+	else { //load defaults
+		Flags.dir = 0;
+		Flags.inputEnable = 0; //don't track input enable
 		PIDkp = PID_KP_START;
 		PIDki = PID_KI_START;
 		PIDkd = PID_KD_START;
 		}
+
+	puts_lit("\r\nMassMind.org BOB P.I.D. v");
+	puts_lit(VERSION_STRING);
+	puts_lit("\r\n");
 	PIDlastInput = encoder_counter; //avoid startup bump
 	PIDITerm = 0;
 	//PIDITerm = constrain(PIDOutput, 0-PWM_MAX, PWM_MAX);	
@@ -648,7 +666,8 @@ reconfigure the pin from input to output, as needed." */
 				MOTOR_ENABLE = 1;
 				}
 			else if (' '==cmd) { //disable motor
-				MOTOR_ENABLE = 0;
+				Flags.inputEnable = 0; //don't track input enable
+				MOTOR_ENABLE = 0; //Disable the motor
 				ERROR_STATUS = 0; //clear errors.
 				}
 			else if ('p'==cmd && 0<=val) { //set new kp
@@ -681,11 +700,27 @@ reconfigure the pin from input to output, as needed." */
 			else if ('w'==cmd && 286==val) { //direction low
 				Flags.dir = 0;
 				}
+			else if ('w'==cmd && 50==val) { //So carefull
+				Flags.inputEnable = 0; //don't track input enable
+				}
+			else if ('w'==cmd && 60==val) { //Go!
+				Flags.inputEnable = 1; //we are enabled if input is
+				}
 			cmd=0; //done with command
 			val=0; //reset value for next reception
 			decimals = 0;
 			}
-
+		
+		if (Flags.inputEnable) {
+			if (INPUT_ENABLE) {
+				MOTOR_ENABLE = 1;
+				}
+			else {
+				MOTOR_ENABLE = 0;
+				ERROR_STATUS = 0; //clear errors.
+				}
+			}
+			
 		ComputePID();
 
 		if (PIDOutput>0) {
