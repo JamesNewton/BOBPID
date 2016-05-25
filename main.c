@@ -19,7 +19,9 @@
 // [X] Add Parameter for polarity of direction
 // [X] Support bootloader for firmware upgrades.
 //     http://picprog.strongedge.net/bootloader/bootloader.html
-// [ ] use enable from step direction input.
+// [X] use enable from step direction input.
+// [X] Why was it using double? Switch to long
+// [X] Add config parameter for step size
 // [ ] Add LCD user interface?
 //     Problem with LCD interface: We don't control X DIR input
 //      which is also used by LCD as a data line.
@@ -27,7 +29,7 @@
 // [ ] Add status reply to "?" command
 // [ ] Add autotune mode with status output
 
-#define VERSION_STRING "0.91"
+#define VERSION_STRING "0.92"
 
 #define MOTOR_ENABLE LATCbits.LATC7  	//Enables Motor Driver
 #define MOTOR_DIRECTION LATAbits.LATA4	//Sets Motor Direction
@@ -51,7 +53,7 @@
 #define	PID_KP_START 20
 #define	PID_KI_START 0.4
 #define	PID_KD_START 50
-#define EEPROM_VERSION '2'
+#define EEPROM_VERSION '3'
 //change when layout of EEPROM data changes so that new code updates
 //don't cause garbled data.
 
@@ -182,32 +184,43 @@ unsigned char encoder_counter=0; //where we are
 #ifdef PID_POS
 void ComputePID();
 
-double Setpoint=0; //where we want to be
-double encoder_counter=0; //where we are
+#define loctype long
+
+loctype Setpoint=0; //where we want to be
+loctype encoder_counter=0; //where we are
 
 //Data to support the PID
 double PIDkp;	//proportional constant
 double PIDki;	//integral constant
 double PIDkd; 	//derivative constant
-double PIDerror;	//error between Setpoint and encoder count
-double PIDlastInput;//last encoder reading (for derivative)
-double PIDdInput;	//change in input (for derivative)
-double PIDITerm;	//integral term (calculated per unit time)
-double PIDOutput;	//output
+loctype PIDerror;	//error between Setpoint and encoder count
+loctype PIDlastInput;//last encoder reading (for derivative)
+loctype PIDdInput;	//change in input (for derivative)
+int PIDITerm;	//integral term (calculated per unit time)
+int PIDOutput;	//output
 
 typedef union {
  struct {
   unsigned dir:1;
   unsigned inputEnable:1;
+  unsigned neg:1;
   };
  unsigned char byte; 
  } T_Flags;
 T_Flags Flags;
 
+unsigned char step_size;
+
+unsigned char cmd; //recieved commands.
+double val; //recieved numbers.
+unsigned char decimals;
+
 #endif
 
 
-#pragma udata access withports //trying to get the vars in the same bank as ports
+//#pragma udata access withports //trying to get the vars in the same bank as ports
+//for this code, it doesn't make any difference. If included, add "near" to vars below.
+
 
 typedef union {
  struct  {
@@ -222,7 +235,7 @@ typedef union {
   };
  unsigned char byte; 
  } T_Bytevar;
-near T_Bytevar  temp;
+T_Bytevar  temp;
 
 typedef union {
  struct {
@@ -234,13 +247,10 @@ typedef union {
   };
  unsigned char byte; 
  } T_Encoder;
-near T_Encoder Enc;
+T_Encoder Enc;
 
-near unsigned char cmd; //recieved commands.
-near double val; //recieved numbers.
-near unsigned char decimals;
 
-near unsigned int timer;
+unsigned int timer;
 
 #define constrain(amt,low,high) ((amt)<(low)?(low):((amt)>(high)?(high):(amt)))
 #define abs(amt) ((amt)<0?0-(amt):(amt))
@@ -255,10 +265,10 @@ void hi_interrupt(void) {
 #ifdef PID_POS
 	if (INTCON3bits.INT1IF) { //did we get a step? INT1 is RA1
 		if (INPUT_DIRECTION) {
-			Setpoint+=INPUT_STEP_SIZE;
+			Setpoint+=step_size;
 			}
 		else {
-			Setpoint-=INPUT_STEP_SIZE;
+			Setpoint-=step_size;
 			}
 		//only need to update the error if the setpoing or encoder change
 		PIDerror = Setpoint - encoder_counter;
@@ -267,6 +277,13 @@ void hi_interrupt(void) {
 #endif
 
 /**** READ ENCODER ****/
+/* Yes, this code looks stupid but it's actually pretty fast. 
+It's an attempt to get a basic C compiler to generate good asm code.
+Yes, those are goto's in a C program. They were cheaper than a call
+to a function, saving several clock cycles and allowing faster encoders.
+I probably should just re-write all this in asm, because then I could 
+use a jump table, but at least this way it's still C and mostly readable.
+*/
 	if (INTCONbits.RABIF) { //did Port A or B bits change?
 		temp.byte = 0;
 		temp.b0 = ENCODER_A; 
@@ -284,17 +301,41 @@ void hi_interrupt(void) {
 			}
 
 		if(Enc.dA) { // A changed
-			if(Enc.A==Enc.B)
-				encoder_counter++;
-			else
-				encoder_counter--;
-			}    
-		else { //if(Enc.dB) { // B changed
-			if(Enc.A==Enc.B)
-				encoder_counter--;
-			else
-				encoder_counter++;
+			if(Enc.A) { // if A==B inc else dec
+				if (Enc.B)
+					 goto encoderinc; //B and now A
+				else
+					 goto encoderdec; //Not B and now A
+				}
+			else { //!Enc.A
+				if (Enc.B)
+					goto encoderdec; //B and now not A
+				else
+					goto encoderinc; //Not B and now not A
+				}
 			}
+		else { //if(Enc.dB) { // B changed
+			if(Enc.A) { // If A==B dec else inc
+				if (Enc.B)
+					goto encoderdec; //A and now B
+				else
+					goto encoderinc; //A and now not B
+				}
+			else { //!Enc.A
+				if (Enc.B)
+					goto encoderinc; //Not A and now B
+				else
+					goto encoderdec; //Not A and now not B
+				}
+			}
+
+encoderinc:
+		encoder_counter++;
+		goto encoderdone;
+encoderdec:
+		encoder_counter--;
+		goto encoderdone; //just so there isn't any speed difference.
+encoderdone:
 
 #ifdef THROTTLE
 		Enc.set_pwm = 1; // Set flag to indicate change to PWM needed
@@ -333,7 +374,7 @@ void lo_interrupt(void){
 			}
 		else switch (temp.byte) {
 			case '.': decimals=1; break;
-			case '-': val = 0-val; break; //'-' must come after number
+			case '-': Flags.neg=1; break; //'-' must come after number
 			default: cmd = temp.byte;  //it's a command
 			}
 		}
@@ -346,14 +387,12 @@ void lo_interrupt(void){
 #ifdef PID_POS
 		if (timer>0) timer--;
       /*Compute derivative and integral variables only once per unit time*/
-		PIDdInput = (encoder_counter - PIDlastInput);
+		PIDdInput = encoder_counter - PIDlastInput;
 		PIDlastInput = encoder_counter;
 
-		PIDITerm = constrain(
-	      	PIDITerm + (PIDki * PIDerror), 
-	      	0-PWM_MAX,
-	      	PWM_MAX
-	      	);
+		PIDITerm = PIDITerm + (PIDki * PIDerror);
+		PIDITerm = constrain(PIDITerm, 0-PWM_MAX, PWM_MAX);
+		//if you try to do this all at once, C18 runs out of temp variable space.
 #endif
 		INTCONbits.TMR0IF = 0;          // Clear interrupt flag
 		}
@@ -368,14 +407,17 @@ void lo_interrupt(void){
 void ComputePID() {
 	
       /*Compute PID Output*/
-      PIDOutput = constrain(
-      	( PIDkp * PIDerror 		//Proportional
+      PIDOutput = 
+      	+ PIDkp * PIDerror 		//Proportional
       	+ PIDITerm 			//Integral ki already in ITerm
       	- PIDkd * PIDdInput	//Differential
-      	  ), 
+		;
+	  //must do the contrain separately or C18 runs out of temp variable space.
+      PIDOutput = constrain( PIDOutput,
       	0-PWM_MAX, //minimum is negative max because direction
       	PWM_MAX
       	);
+
  	}
 
 #endif
@@ -636,6 +678,7 @@ reconfigure the pin from input to output, as needed." */
 		PIDkp = Read_Double_EEPROM(2 + (0*sizeof(double)));
 		PIDki = Read_Double_EEPROM(2 + (1*sizeof(double)));
 		PIDkd = Read_Double_EEPROM(2 + (2*sizeof(double)));
+		step_size = Read_EEPROM(2 + (3*sizeof(double)));
 		}
 	else { //load defaults
 		Flags.dir = 0;
@@ -643,6 +686,7 @@ reconfigure the pin from input to output, as needed." */
 		PIDkp = PID_KP_START;
 		PIDki = PID_KI_START;
 		PIDkd = PID_KD_START;
+		step_size = INPUT_STEP_SIZE;
 		}
 
 	puts_lit("\r\nMassMind.org BOB P.I.D. v");
@@ -657,6 +701,7 @@ reconfigure the pin from input to output, as needed." */
 		if (cmd) { //we got a new value and command.
 			while (1 < decimals--) 
 				val/=10;
+			if (Flags.neg) { val = -val; Flags.neg=0;}
 			if (13==cmd && 0!=val) { //cmd was just enter
 				Setpoint = val;
 				PIDerror = Setpoint - encoder_counter;
@@ -679,13 +724,9 @@ reconfigure the pin from input to output, as needed." */
 			else if ('d'==cmd && 0<=val) { //set new kd
 				PIDkd = val;// /(double)PID.SampleTime/1000;
 				}
-//			else if ('t'==cmd && 0<val) { //set a new sample time
-//				double ratio  = (double)val
-//					/ (double)PID.SampleTime;
-//				PID.ki *= ratio;
-//				PID.kd /= ratio;
-//				PID.SampleTime = (unsigned long)val;
-//				}
+			else if ('s'==cmd && 0<val && 2^sizeof(step_size)>val) { //set a new step size
+				step_size=(char)val;
+				}
 			else if ('w'==cmd && 321==val) { //save parms
 				//TODO: let the user know they need to enter 321w
 				Write_EEPROM(1,Flags.byte); //Save flags
