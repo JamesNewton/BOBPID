@@ -20,8 +20,12 @@
 // [X] Support bootloader for firmware upgrades.
 //     http://picprog.strongedge.net/bootloader/bootloader.html
 // [X] use enable from step direction input.
-// [X] Why was it using double? Switch to long
-// [X] Add config parameter for step size
+// [X] Why was it using double? Switch to long 0.92
+// [X] Add config parameter for step size 0.92
+// [X] Fixed OUT_RES_DIV 16 vs 10 bug 0.93
+// [X] Faster! Change to 64MHz clock 0.93
+// [ ] Faster!! Just track error, vs Setpoint / encoder_counter
+// [ ] Faster!! Switch to assembly jump table in decoder?
 // [ ] Add LCD user interface?
 //     Problem with LCD interface: We don't control X DIR input
 //      which is also used by LCD as a data line.
@@ -29,7 +33,7 @@
 // [ ] Add status reply to "?" command
 // [ ] Add autotune mode with status output
 
-#define VERSION_STRING "0.92"
+#define VERSION_STRING "0.93"
 
 #define MOTOR_ENABLE LATCbits.LATC7  	//Enables Motor Driver
 #define MOTOR_DIRECTION LATAbits.LATA4	//Sets Motor Direction
@@ -63,12 +67,13 @@
 #define PWM_MAX 253
 //#define PWM_MIN 0
 
-#define OUT_RES_DIV 16	//Amount to divide the output by for PWM.
+#define OUT_RES_DIV 2	//Amount to divide the output by for PWM.
 //Too low a value her make the units for the PID impossibly small
 //and makes resolution two high. Too high reduces resolution.
 
-#define OSC_FREQ 16000000L	
+//#define OSC_FREQ 16000000L	
 //Max 16 MHz in standard modes.
+#define OSC_FREQ 64000000L	
 //Up to 64M available with extra PLL setup.
 //#define BAUD_RATE 9600
 #define BAUD_RATE 38400
@@ -85,14 +90,25 @@
    produce a PWM output between 0 and 250 to drive the motor to
    the desired position. */
 
-// Frequency will be (FOSC/4)/((256-X)*Prescale) in 8 bit mode and
-// (FOSC/4)/((65536-X)*Prescale) in 16 bit mode. Solving for X we get
-// X = 256 - Hz * Prescale * FOSC/4
-#define TIMER0_PRESCALE 256
-#define TIMER0_COUNT (256 - (OSC_FREQ / (4UL*SAMPLE_FREQ*TIMER0_PRESCALE)))
-#if TIMER0_COUNT < 0 || TIMER0_COUNT > 255
-#error TIMER0 count out of range
-#endif
+#if OSC_FREQ == 16000000L
+// Frequency will be (FOSC/4)/((256-X)*Prescale) in 8 bit mode 
+// Solving for X we get X = 256 - Hz * Prescale * FOSC/4
+ #define TIMER0_PRESCALE 256
+ #define TIMER0_COUNT (256 - (OSC_FREQ / (4UL*SAMPLE_FREQ*TIMER0_PRESCALE)))
+ #if TIMER0_COUNT < 0 || TIMER0_COUNT > 255
+  #error TIMER0 count out of range
+  #endif
+ #endif
+
+#if OSC_FREQ == 64000000L
+// Frequency will be (FOSC/4)/((65536-X)*Prescale) in 16 bit mode. 
+// Solving for X we get  X = 655536 - Hz * Prescale * FOSC/4
+ #define TIMER0_PRESCALE 256
+ #define TIMER0_COUNT (65536 - (OSC_FREQ / (4UL*SAMPLE_FREQ*TIMER0_PRESCALE)))
+ #if TIMER0_COUNT < 0 || TIMER0_COUNT > 65535
+  #error TIMER0 count out of range
+  #endif
+ #endif
 
 #include <p18f14k22.h>
 #define EE_BLOCK_SIZE 64
@@ -104,7 +120,11 @@
 #pragma config MCLRE = OFF
 #pragma config LVP = OFF
 #pragma config HFOFST = OFF
+#if OSC_FREQ == 64000000L
+#pragma config PLLEN = ON
+#else
 #pragma config PLLEN = OFF
+#endif
 
 //Define Interrupt Locations
 void hi_interrupt(void);
@@ -283,6 +303,7 @@ Yes, those are goto's in a C program. They were cheaper than a call
 to a function, saving several clock cycles and allowing faster encoders.
 I probably should just re-write all this in asm, because then I could 
 use a jump table, but at least this way it's still C and mostly readable.
+The switch / case is even worse... C18 doesn't make a jump table.
 */
 	if (INTCONbits.RABIF) { //did Port A or B bits change?
 		temp.byte = 0;
@@ -293,9 +314,9 @@ use a jump table, but at least this way it's still C and mostly readable.
 		Enc.byte <<= 2;        //and save that 
 		Enc.byte |= temp.byte; //and save this reading.
 
-		ERROR_STATUS = ERROR_OFF;
 		if(Enc.dA && Enc.dB) { //overrun?
 			ERROR_STATUS = ERROR_ON;
+			timer=SAMPLE_FREQ/4;	// Dividing by 4 gives 1/4 second blink
 			TXREG = '!';
 			return;
 			}
@@ -382,6 +403,8 @@ void lo_interrupt(void){
 
 /**** TIMER TICK ****/
 	if (INTCONbits.TMR0IF) {
+
+		TMR0H = TIMER0_COUNT / 256;
 		TMR0L = TIMER0_COUNT;
 
 #ifdef PID_POS
@@ -426,12 +449,12 @@ void ComputePID() {
 /**** OUTPUT PWM ****/
 void SetPWM(unsigned char pwm_width) {
 	// set pwm values
-	// input of 0 to 25
+	// input of 0 to 25 ??? no it isn't... 
 	// PWM output is on P1A (pin 5)
 
 	unsigned char pwm_lsb;
 
-	pwm_width*=10;                         // change value from 0-25 to 0-250
+	pwm_width*=OUT_RES_DIV;                // 
 	//10 Bits - 2 LSB's go in CCP1CON 5:4, 8 MSB's go in CCPR1L
 	pwm_lsb = pwm_width & 0b00000011;      // Save 2 LSB
 	CCPR1L = pwm_width >> 2;               // Remove 2 LSB and store 8 MSB in CCPR1L (only 6 bits as max duty value = 250)
@@ -493,9 +516,18 @@ void puts_lit(const rom char *zstr) {
 void main(void) {
 #if OSC_FREQ == 16000000L
 	OSCCON = 0b01110010;		// Int osc at 16 MHz
-#else
+#define OSCON_OK
+#endif
+#if OSC_FREQ == 64000000L
+	OSCCON = 0b01110000;		// Int osc at 16 MHz, System clock primary
+	OSCTUNE = 0b01000000;		// PLL enabled, 
+#define OSCON_OK
+#endif
+
+#ifndef OSCON_OK
 #error "Update OSCON bits to match FOSC"
 #endif
+
 	TRISA = 0b11111111;			// Set Ports to all inputs.
 	TRISB = 0b11111111;			// ...should be already but
 	TRISC = 0b11111111;			// ...let's not take chances?
@@ -542,7 +574,9 @@ reconfigure the pin from input to output, as needed." */
 /**** SETUP INTERRUPTS ****/
 	T0CON=0			// Timer 0 Control
 		| 0b10000000	// Enable timer 0=disabled
+#if OSC_FREQ == 16000000L
 		| 0b01000000	// 8 bit counter 0=16 bit
+#endif
 	//	| 0b00100000	// External clock 0=internal 1=external
 	//	| 0b00010000	// Increment on falling edge 0=rising
 	//	| 0b00001000	// Disable Prescaling 0=Enabled 1=disabled
@@ -567,6 +601,7 @@ reconfigure the pin from input to output, as needed." */
 #endif
 		;
 
+	TMR0H = TIMER0_COUNT/256;		// 
 	TMR0L = TIMER0_COUNT;		// 
 
 //	INTCON2bits.RABPU = 1;		// Port A and B pull-up 1=DISable
@@ -638,8 +673,12 @@ reconfigure the pin from input to output, as needed." */
 	* Maximum duty value = 250 
 	*/
 #if OSC_FREQ == 16000000L
-	T2CON = 0b01111111;           // prescaler postscaler to give 250Hz + turn on TMR2;
+	T2CON = 0b01111111;           // prescaler postscaler max + turn on TMR2;
 	PR2 = 62;                     // gives 250Hz
+#elif OSC_FREQ == 64000000L
+	T2CON = 0b01111111;           // prescaler postscaler max + turn on TMR2;
+	PR2 = 62;                     // should give 250Hz?
+
 #else
 #error "Update T2CON bits and PR2 to match FOSC"
 #endif
@@ -662,8 +701,6 @@ reconfigure the pin from input to output, as needed." */
 	timer=SAMPLE_FREQ/2;	// Dividing by 2 gives 1/2 second blink
 	ERROR_STATUS=ERROR_ON;	// Let the user know we are coming on.
 	TRISAbits.TRISA2 = 0;	// Set A2 output for XErr / LED on J12
-	while(timer>0) ;
-	ERROR_STATUS=ERROR_OFF;	//
 
 	MOTOR_ENABLE = 0; 	// Set Motor disabled
 	TRISCbits.TRISC7 = 0;	// Set pin C7 0=output for motor enable
@@ -763,7 +800,6 @@ reconfigure the pin from input to output, as needed." */
 			}
 			
 		ComputePID();
-
 		if (PIDOutput>0) {
 			MOTOR_DIRECTION = Flags.dir; //set direction forward
 			}
@@ -771,6 +807,9 @@ reconfigure the pin from input to output, as needed." */
 			MOTOR_DIRECTION = !Flags.dir; //set direction backward
 			}
 		SetPWM(abs(PIDOutput)/OUT_RES_DIV);
+
+		if (!timer) ERROR_STATUS=ERROR_OFF;	
+
 		}
 #endif
 
