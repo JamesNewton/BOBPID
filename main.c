@@ -20,20 +20,37 @@
 // [X] Support bootloader for firmware upgrades.
 //     http://picprog.strongedge.net/bootloader/bootloader.html
 // [X] use enable from step direction input.
-// [X] Why was it using double? Switch to long 0.92
-// [X] Add config parameter for step size 0.92
-// [X] Fixed OUT_RES_DIV 16 vs 10 bug 0.93
-// [X] Faster! Change to 64MHz clock 0.93
-// [ ] Faster!! Just track error, vs Setpoint / encoder_counter
+// [X] 0.92 Why was it using double? Switch to long 
+// [X] 0.92 Add config parameter for step size
+// [X] 0.93 Fixed OUT_RES_DIV 16 vs 10 bug
+// [X] 0.93 Faster! Change to 64MHz clock 
+// [X] 0.94 Faster!! Just track error, vs Setpoint - encoder_counter 
+//	Note: Step/Direction input is now relative. Calculation of 
+//	Derivative and Integral terms changed. May need to re-tune
+//  EEPROM Version '3'
+// [X] 0.94 Fix: Actually save the step size parameter
+// [X] 0.95 Just one "!" per encoder overrun; avoid buffer overrun
+// [X] 0.95 Add version / status / settings as "?" command
+// [x] 0.95 Let the user know they need to enter 321w to save
+// [X] 0.95 Past MAX_ERROR, disable and suggest other direction
+// [X] 0.95 Movements via serial command have a max velocity 'v'
+//	Setpoint is now relative, always returns to 0, no wraparaound
+//	Smaller datasizes (short long, 24 bits) used for most variables
+//  EEPROM Version '4'
+// [X] 0.96 BugFix: 10 display digits exceeded precision. 9 works.
+// [X] 0.96 BugFix: Avoid PIDerror changing during calculations.
 // [ ] Faster!! Switch to assembly jump table in decoder?
+// [ ] Recover position via index pulse if available??
+// [ ] Support digital modes with AS brand encoders???
+// [ ] Set velocity and use PID to control that instead of position
 // [ ] Add LCD user interface?
 //     Problem with LCD interface: We don't control X DIR input
 //      which is also used by LCD as a data line.
 // [ ] Add demo mode
-// [ ] Add status reply to "?" command
 // [ ] Add autotune mode with status output
 
-#define VERSION_STRING "0.93"
+#define VERSION_STRING "0.96"
+#define veloc
 
 #define MOTOR_ENABLE LATCbits.LATC7  	//Enables Motor Driver
 #define MOTOR_DIRECTION LATAbits.LATA4	//Sets Motor Direction
@@ -54,10 +71,10 @@
 #define ERROR_ON 1
 #define ERROR_OFF 0
 
-#define	PID_KP_START 20
-#define	PID_KI_START 0.4
-#define	PID_KD_START 50
-#define EEPROM_VERSION '3'
+#define	PID_KP_START 0.2
+#define	PID_KI_START 0.01
+#define	PID_KD_START 0.1
+#define EEPROM_VERSION '4'
 //change when layout of EEPROM data changes so that new code updates
 //don't cause garbled data.
 
@@ -66,6 +83,8 @@
 
 #define PWM_MAX 253
 //#define PWM_MIN 0
+
+#define MAX_ERROR 100000
 
 #define OUT_RES_DIV 2	//Amount to divide the output by for PWM.
 //Too low a value her make the units for the PID impossibly small
@@ -78,17 +97,9 @@
 //#define BAUD_RATE 9600
 #define BAUD_RATE 38400
 
-//#define THROTTLE
-/* Use THROTTLE for simple (working tested) throttle control
-   The encoder is read, and limited to 0 to 25 which produces
-   a PWM output between 0 and 250. */
-#define MAX_COUNT 25
 
-#define PID_POS
-/* Use PID_POS for simple (NOT tested) PID position controller
-   The encoder is read, and compared to Setpoint. PID is used to
-   produce a PWM output between 0 and 250 to drive the motor to
-   the desired position. */
+#define DISPLAY_DIGITS 7
+#define DISPLAY_PRECISION 3
 
 #if OSC_FREQ == 16000000L
 // Frequency will be (FOSC/4)/((256-X)*Prescale) in 8 bit mode 
@@ -130,8 +141,8 @@
 void hi_interrupt(void);
 void lo_interrupt(void);
 
-//#define BOOTLOADER
-/*To enable the bootloader, 
+#define BOOTLOADER
+/*To enable the bootloader, with output in <project>.HEX file
 Find \src\traditional\startup\c018i.c, make local copy, add to project
 Edit as follows:
 
@@ -197,50 +208,13 @@ void low_vector(void){
 
 #pragma code
 
-#ifdef THROTTLE
-unsigned char encoder_counter=0; //where we are
-#endif
-
-#ifdef PID_POS
 void ComputePID();
 
-#define loctype long
+//short long is 24 bits, was long, 32 bits
+#define loctype short long
 
-loctype Setpoint=0; //where we want to be
-loctype encoder_counter=0; //where we are
-
-//Data to support the PID
-double PIDkp;	//proportional constant
-double PIDki;	//integral constant
-double PIDkd; 	//derivative constant
-loctype PIDerror;	//error between Setpoint and encoder count
-loctype PIDlastInput;//last encoder reading (for derivative)
-loctype PIDdInput;	//change in input (for derivative)
-int PIDITerm;	//integral term (calculated per unit time)
-int PIDOutput;	//output
-
-typedef union {
- struct {
-  unsigned dir:1;
-  unsigned inputEnable:1;
-  unsigned neg:1;
-  };
- unsigned char byte; 
- } T_Flags;
-T_Flags Flags;
-
-unsigned char step_size;
-
-unsigned char cmd; //recieved commands.
-double val; //recieved numbers.
-unsigned char decimals;
-
-#endif
-
-
-//#pragma udata access withports //trying to get the vars in the same bank as ports
+#pragma udata access withports //trying to get the vars in the same bank as ports
 //for this code, it doesn't make any difference. If included, add "near" to vars below.
-
 
 typedef union {
  struct  {
@@ -255,7 +229,7 @@ typedef union {
   };
  unsigned char byte; 
  } T_Bytevar;
-T_Bytevar  temp;
+near T_Bytevar  temp;
 
 typedef union {
  struct {
@@ -267,14 +241,56 @@ typedef union {
   };
  unsigned char byte; 
  } T_Encoder;
-T_Encoder Enc;
+near T_Encoder Enc;
+
+near loctype Setpoint; //distance to the goal
+near loctype Slowpoint; //where we want to start slowing down
+near unsigned int move; //amount to move this tick.
+near unsigned int vmax; //max Setpoint change per sample time
+near unsigned int velocity; //current change per sample time
+near char amax; //max change in change per sample time TODO: Save this
+near char accel; //current change in change per sample time
+
+//Data to support the PID
+near loctype PIDerror;	//error between Setpoint and encoder count
+
+near double PIDkp;	//proportional constant
+near double PIDki;	//integral constant
+near double PIDkd; 	//derivative constant
+
+near loctype PIDlastInput;//last encoder reading (for derivative)
+near loctype PIDdInput;	//change in input (for derivative)
+near int PIDITerm;	//integral term (calculated per unit time)
+near int PIDOutput;	//output
+
+typedef union {
+ struct {
+  unsigned dir:1;
+  unsigned inputEnable:1;
+  unsigned neg:1;
+  unsigned saved:1;
+  };
+ unsigned char byte; 
+ } T_Flags;
+near T_Flags Flags;
+
+near unsigned char step_size;
+
+near unsigned char cmd; //recieved commands.
+near double val; //recieved numbers.
+near unsigned char decimals;
 
 
-unsigned int timer;
+
+
+near unsigned int timer;
 
 #define constrain(amt,low,high) ((amt)<(low)?(low):((amt)>(high)?(high):(amt)))
 #define abs(amt) ((amt)<0?0-(amt):(amt))
-
+#define min(v1,v2) ((v1)<(v2)?(v1):(v2))
+#define smaxval(t) (((0x1ULL << ((sizeof(t) * 8ULL) - 1ULL)) - 1ULL) | \
+                    (0x7ULL << ((sizeof(t) * 8ULL) - 4ULL)))
+                    
 #pragma interrupt hi_interrupt
 void hi_interrupt(void) {
 	// ------------------------
@@ -282,19 +298,15 @@ void hi_interrupt(void) {
 	// ------------------------    
 
 /**** STEP INPUT ****/
-#ifdef PID_POS
 	if (INTCON3bits.INT1IF) { //did we get a step? INT1 is RA1
 		if (INPUT_DIRECTION) {
-			Setpoint+=step_size;
+			PIDerror+=step_size;
 			}
 		else {
-			Setpoint-=step_size;
+			PIDerror-=step_size;
 			}
-		//only need to update the error if the setpoing or encoder change
-		PIDerror = Setpoint - encoder_counter;
 		INTCON3bits.INT1IF = 0; //clear the interrupt
 		}
-#endif
 
 /**** READ ENCODER ****/
 /* Yes, this code looks stupid but it's actually pretty fast. 
@@ -311,13 +323,19 @@ The switch / case is even worse... C18 doesn't make a jump table.
 		temp.b1 = ENCODER_B; 
 
 		Enc.byte ^= temp.byte; //XOR last reading with this
+		
 		Enc.byte <<= 2;        //and save that 
+//_asm	//C compiler literally multiplies by 4, but this causes encoder errors
+//	RLNCF Enc, 1, 0 //just "Enc" because ASM doesn't know structures
+//	RLNCF Enc, 1, 0 //1=put result back in file register, 0=in access bank
+//_endasm
+		
 		Enc.byte |= temp.byte; //and save this reading.
 
 		if(Enc.dA && Enc.dB) { //overrun?
+			if (ERROR_ON != ERROR_STATUS) TXREG = '!'; //just one per warning.
 			ERROR_STATUS = ERROR_ON;
 			timer=SAMPLE_FREQ/4;	// Dividing by 4 gives 1/4 second blink
-			TXREG = '!';
 			return;
 			}
 
@@ -351,24 +369,12 @@ The switch / case is even worse... C18 doesn't make a jump table.
 			}
 
 encoderinc:
-		encoder_counter++;
+		PIDerror--; //positive motion is negative error
 		goto encoderdone;
 encoderdec:
-		encoder_counter--;
+		PIDerror++; //negative motion is positive error
 		goto encoderdone; //just so there isn't any speed difference.
 encoderdone:
-
-#ifdef THROTTLE
-		Enc.set_pwm = 1; // Set flag to indicate change to PWM needed
-		if (encoder_counter>254) encoder_counter=0;
-		if (encoder_counter>MAX_COUNT) encoder_counter=MAX_COUNT;
-#endif
-
-#ifdef PID_POS
-		//only need to update the error if the setpoing or encoder change
-		PIDerror = Setpoint - encoder_counter;
-#endif
-
 		INTCONbits.RABIF = 0; //reset port a and b interrupt flag
 		//reading the port should have done this already, but...
 		}
@@ -407,43 +413,77 @@ void lo_interrupt(void){
 		TMR0H = TIMER0_COUNT / 256;
 		TMR0L = TIMER0_COUNT;
 
-#ifdef PID_POS
-		if (timer>0) timer--;
-      /*Compute derivative and integral variables only once per unit time*/
-		PIDdInput = encoder_counter - PIDlastInput;
-		PIDlastInput = encoder_counter;
+		move=min(velocity,abs(Setpoint));
+		if (Setpoint>0) {
+			PIDerror+=move;
+			Setpoint-=move;
+			if (accel>=0 && Setpoint < Slowpoint) accel = -amax;
+			if (velocity < vmax) Slowpoint += move;
+			} 
+		else if (Setpoint<0) {
+			PIDerror-=move; 
+			Setpoint+=move;
+			if (accel>=0 && Setpoint > Slowpoint) accel = -amax;
+			if (velocity < vmax) Slowpoint -= move;
+			}
 
-		PIDITerm = PIDITerm + (PIDki * PIDerror);
+		velocity += accel;
+		if (velocity > vmax) {
+			velocity = vmax;
+			accel = 0;
+			}
+			
+		if (timer>0) 
+			timer--;
+
+      /*Compute derivative and integral variables only once per unit time*/
+		//PIDdInput = PIDlastInput - PIDerror;
+		//PIDlastInput = PIDerror;
+		PIDdInput = PIDlastInput;
+      	INTCONbits.RABIE = 0; //keep PIDerror from changing
+		PIDlastInput = PIDerror;
+		INTCONbits.RABIE = 1; //allow PIDerror to change
+		PIDdInput -= PIDlastInput;
+
+		//PIDITerm = PIDITerm + (PIDki * PIDerror);
+		PIDITerm = PIDITerm + (PIDki * PIDlastInput); //avoid PIDerror changing
+		
 		PIDITerm = constrain(PIDITerm, 0-PWM_MAX, PWM_MAX);
 		//if you try to do this all at once, C18 runs out of temp variable space.
-#endif
+
 		INTCONbits.TMR0IF = 0;          // Clear interrupt flag
 		}
 
 	}
 
 
-#ifdef PID_POS
 
 /**** COMPUTE OUTPUT VIA PID ****/
 //http://brettbeauregard.com/blog/2011/04/improving-the-beginners-pid-direction/
 void ComputePID() {
 	
-      /*Compute PID Output*/
-      PIDOutput = 
-      	+ PIDkp * PIDerror 		//Proportional
-      	+ PIDITerm 			//Integral ki already in ITerm
-      	- PIDkd * PIDdInput	//Differential
-		;
-	  //must do the contrain separately or C18 runs out of temp variable space.
-      PIDOutput = constrain( PIDOutput,
-      	0-PWM_MAX, //minimum is negative max because direction
-      	PWM_MAX
-      	);
+    /*Compute PID Output*/
+    //PIDOutput = 
+    //	+ PIDkp * PIDerror 	//Proportional
+    //	+ PIDITerm 			//Integral ki already in ITerm
+    //	- PIDkd * PIDdInput	//Differential
+	//	;
+
+	INTCONbits.RABIE = 0; //keep PIDerror from changing
+	PIDOutput = PIDerror;
+	INTCONbits.RABIE = 1; //allow PIDerror to change
+	PIDOutput *= PIDkp;				//Proportional
+	PIDOutput += PIDITerm; 			//Integral ki already in ITerm
+	PIDOutput -= PIDkd * PIDdInput;	//Differential
+
+	//must do the contrain separately or C18 runs out of temp variable space.
+	PIDOutput = constrain( PIDOutput,
+    	0-PWM_MAX, //minimum is negative max because direction
+    	PWM_MAX
+    	);
 
  	}
 
-#endif
 
 
 /**** OUTPUT PWM ****/
@@ -504,14 +544,72 @@ unsigned char Write_Double_EEPROM(unsigned char address, double data) {
 	return sizeof(double);
 	}
 	
+void putchar(char c) {
+	while (!PIR1bits.TXIF)
+   	    ;
+   	TXREG = c;
+	}
+
 void puts_lit(const rom char *zstr) {
 	while(*zstr) {
-		while (!PIR1bits.TXIF)
-    	    ;
-    	TXREG = *zstr;
+		putchar(*zstr);
     	zstr++;
     	}
 	}
+
+
+const long pow10[10] = {1,10,100,1000,10000,100000,1000000,10000000,100000000,1000000000};
+
+void puts_int( //send positive integers to STDOUT via putchar(char)
+   unsigned int num	//positive integer to display
+  ,char digits	//count of digits, negative and '0' pad for trailing zeros
+  ,char pad		//character to pad with, or null 
+  ) {
+unsigned int i;
+char c;
+unsigned char d;
+  d = abs(digits);
+  while (0 < d) {
+    i = num/pow10[--d]; //pre-increment
+    if (d && !i) { //no digits found yet
+      if (pad) putchar(pad); 
+      }
+    else { //found something
+      c = i%10; //only want the lowest digit
+      //Optional: Don't continue after fraction done
+      if ('0'==pad && 0<digits && 0==c) return; 
+      putchar(c+'0'); //convert to ASCII and send
+      }
+    }
+  return;
+  }
+ 
+
+void puts_double( //send floating point numbers to STDOUT
+    float f  	//number to display
+  , char precision	//precision, negative to keep trailing zeros
+  ) {
+unsigned int a;
+ 
+// check for negative float
+  if(f<0.0) { //is it negative?
+    putchar('-'); //indicate
+    f*=-1; //make it positive
+    }
+ 
+  a=(int)f;	// extract whole number
+  puts_int(a,DISPLAY_DIGITS,0);
+  if (precision) {
+    putchar('.');
+    f-=(float)a; //remove whole part
+    f*=pow10[abs(precision)]; // promote to precision
+    f+=0.5; // round
+    a=(int)f; // extract whole number
+    puts_int(a,precision,'0');
+    }
+  return; 
+  }
+
 
 void main(void) {
 #if OSC_FREQ == 16000000L
@@ -706,9 +804,10 @@ reconfigure the pin from input to output, as needed." */
 	TRISCbits.TRISC7 = 0;	// Set pin C7 0=output for motor enable
 
 
-#ifdef PID_POS
 	/**** INITIALIZE PID ****/
 
+	amax = 1; //TODO: actually save and restore this
+	
 	//try EEPROM
 	if (EEPROM_VERSION==Read_EEPROM(0) ) {
 		Flags.byte = Read_EEPROM(1);
@@ -716,73 +815,133 @@ reconfigure the pin from input to output, as needed." */
 		PIDki = Read_Double_EEPROM(2 + (1*sizeof(double)));
 		PIDkd = Read_Double_EEPROM(2 + (2*sizeof(double)));
 		step_size = Read_EEPROM(2 + (3*sizeof(double)));
+		vmax = Read_EEPROM(3 + (3*sizeof(double)))
+				+ (Read_EEPROM(4 + (3*sizeof(double)))<<8);
 		}
 	else { //load defaults
 		Flags.dir = 0;
 		Flags.inputEnable = 0; //don't track input enable
+		Flags.saved=0;
 		PIDkp = PID_KP_START;
 		PIDki = PID_KI_START;
 		PIDkd = PID_KD_START;
 		step_size = INPUT_STEP_SIZE;
+		vmax = 10;
+		puts_lit("NO SETTINGS!");
 		}
 
-	puts_lit("\r\nMassMind.org BOB P.I.D. v");
-	puts_lit(VERSION_STRING);
-	puts_lit("\r\n");
-	PIDlastInput = encoder_counter; //avoid startup bump
+	PIDerror = 0; //avoid startup bump
 	PIDITerm = 0;
 	//PIDITerm = constrain(PIDOutput, 0-PWM_MAX, PWM_MAX);	
 	//Even if previously running (can't be in this case)
-	Setpoint = encoder_counter + 1; //just for testing.
+	Setpoint = 0;
+	cmd = '?';
 	while(1) {
 		if (cmd) { //we got a new value and command.
-			while (1 < decimals--) 
-				val/=10;
-			if (Flags.neg) { val = -val; Flags.neg=0;}
+			while (1 < decimals--) //convert to fraction
+				val/=10; //via repeated decimal shift
+			if (Flags.neg) { val = -val; Flags.neg=0;} //apply sign
+			//value is now ready
 			if (13==cmd && 0!=val) { //cmd was just enter
-				Setpoint = val;
-				PIDerror = Setpoint - encoder_counter;
+				Setpoint = val - Setpoint; //Setpoint is really position error
+				velocity = Slowpoint = 0;
+				accel = amax;
+				//PIDerror += val - Setpoint;
+				//Setpoint = val;
 				}
 			else if ('e'==cmd) { //enable motor
-				encoder_counter = Setpoint; //We want to be where we start
+				PIDerror=0; //We want to be where we start
+				Setpoint=vmax; //give a little kick to start
+				SetPWM(0);
 				MOTOR_ENABLE = 1;
+				ERROR_STATUS = 0; //clear errors.
 				}
-			else if (' '==cmd) { //disable motor
+			else if (' '==cmd || 27==cmd || '!'==cmd) { //disable motor
 				Flags.inputEnable = 0; //don't track input enable
 				MOTOR_ENABLE = 0; //Disable the motor
 				ERROR_STATUS = 0; //clear errors.
 				}
 			else if ('p'==cmd && 0<=val) { //set new kp
 				PIDkp = val;
+				Flags.saved=0;
 				}
 			else if ('i'==cmd && 0<=val) { //set new ki
 				PIDki = val;// *(double)PID.SampleTime/1000;
+				Flags.saved=0;
 				}
 			else if ('d'==cmd && 0<=val) { //set new kd
 				PIDkd = val;// /(double)PID.SampleTime/1000;
+				Flags.saved=0;
 				}
 			else if ('s'==cmd && 0<val && 2^sizeof(step_size)>val) { //set a new step size
 				step_size=(char)val;
+				Flags.saved=0;
+				}
+			else if ('v'==cmd && 0<val && 2^sizeof(vmax)>val) { //set a new maximum velocity
+				vmax=(unsigned int)val;
+				Flags.saved=0;
+				}
+			else if ('a'==cmd && 0<val && 2^sizeof(amax)>val) { //set a new maximum acceleration
+				amax=(unsigned int)val;
+				Flags.saved=0;
 				}
 			else if ('w'==cmd && 321==val) { //save parms
-				//TODO: let the user know they need to enter 321w
+				Flags.saved=1;
 				Write_EEPROM(1,Flags.byte); //Save flags
 				Write_Double_EEPROM(2 + (0*sizeof(double)),PIDkp);
 				Write_Double_EEPROM(2 + (1*sizeof(double)),PIDki);
 				Write_Double_EEPROM(2 + (2*sizeof(double)),PIDkd);
+				Write_EEPROM(2 + (3*sizeof(double)),step_size);
+				Write_EEPROM(3 + (3*sizeof(double)),vmax&0xFF);
+				Write_EEPROM(4 + (3*sizeof(double)),vmax>>8);
 				Write_EEPROM(0,EEPROM_VERSION); //flag the EEPROM
+				}
+			else if ('w'==cmd && 8007==val) { //reset to bootloader
+_asm
+	RESET
+_endasm
 				}
 			else if ('w'==cmd && 216==val) { //direction high
 				Flags.dir = 1;
+				Flags.saved=0;
 				}
 			else if ('w'==cmd && 286==val) { //direction low
 				Flags.dir = 0;
+				Flags.saved=0;
 				}
 			else if ('w'==cmd && 50==val) { //So carefull
 				Flags.inputEnable = 0; //don't track input enable
+				Flags.saved=0;
 				}
 			else if ('w'==cmd && 60==val) { //Go!
 				Flags.inputEnable = 1; //we are enabled if input is
+				Flags.saved=0;
+				}
+			else if ('?'==cmd ) { //Help
+				puts_lit("\r\nMassMind.org BOB P.I.D. v");
+				puts_lit(VERSION_STRING);
+				//puts_lit("\r\n");
+				puts_lit(" err:");
+				puts_double(PIDerror,0);
+				puts_lit(" ");
+				if (Setpoint) puts_double(Setpoint,0);
+				puts_lit("\r\n");
+				puts_double(PIDkp,DISPLAY_PRECISION);
+				puts_lit("p ");
+				puts_double(PIDki,DISPLAY_PRECISION);
+				puts_lit("i ");
+				puts_double(PIDkd,DISPLAY_PRECISION);
+				puts_lit("d ");
+				puts_int(step_size,DISPLAY_PRECISION,0);
+				puts_lit("s ");
+				puts_int(vmax,DISPLAY_PRECISION,0);
+				puts_lit("v ");
+				puts_lit(Flags.dir?"216w":"286w");
+				puts_lit(Flags.inputEnable?"60w":"50w");
+				puts_lit("\r\n");
+				if (!Flags.saved) {
+					puts_lit("321w 2Save\r\n");
+					}
 				}
 			cmd=0; //done with command
 			val=0; //reset value for next reception
@@ -808,21 +967,16 @@ reconfigure the pin from input to output, as needed." */
 			}
 		SetPWM(abs(PIDOutput)/OUT_RES_DIV);
 
+		if (MAX_ERROR<abs(PIDerror)) { //error out of control
+			MOTOR_ENABLE=0;
+			ERROR_STATUS = ERROR_ON;
+			puts_lit("\r\nMAX ERROR! Try ");
+			puts_lit(Flags.dir?"286w":"216w"); //try the opposite
+			PIDerror = 0; //clear the error.
+			}
 		if (!timer) ERROR_STATUS=ERROR_OFF;	
 
 		}
-#endif
-
-#ifdef THROTTLE
-
-	while(1) {
-		if(Enc.set_pwm) {
-			//Set PWM values
-			SetPWM(encoder_counter);
-			Enc.set_pwm = 0;
-			}
-		}
-#endif
 
 	}
 
