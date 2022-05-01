@@ -41,10 +41,10 @@
 //  EEPROM Version '4'
 // [X] 0.96 BugFix: 10 display digits exceeded precision. 9 works.
 // [X] 0.96 BugFix: Avoid PIDerror changing during calculations.
-// [x] 0.96 Periodic error output in reverse HEX. E.g. 15 is +F00000.
+// [x] 0.97 Periodic error output in reverse HEX. E.g. 15 is +F00000.
 //  "TEll" 7311w turns it on, "lESS" 1355w off.
-// [X] 0.96 Add 'r' command to report error
-// [ ] 0.96 Error output in standard hex.
+// [X] 0.97 Add 'r' command to report error
+// [X] 0.97 Error output in standard hex.
 // [ ] RC PWM: 100Hz PWM with zero at 1.5mS, reverse at 1mS
 //  and forward at 2mS) so we can support ESC's for BLDC motors. 
 // [ ] RC Servo signal input
@@ -58,7 +58,7 @@
 // [ ] Add demo mode
 // [ ] Add autotune mode 
 
-#define VERSION_STRING "0.96"
+#define VERSION_STRING "0.97"
 #define veloc
 
 #define MOTOR_ENABLE LATCbits.LATC7  	//Enables Motor Driver
@@ -900,7 +900,7 @@ reconfigure the pin from input to output, as needed." */
 				//Setpoint = val;
 				}
 			else if ('q'==cmd) { //Question. Returns error
-				puts_hex(PIDerror); //pass by value so copy unchanged
+				puts_double(PIDerror,0); //pass by value so copy unchanged
 				}	
 //			else if ('t'==cmd) { //Tune (reserved)
 //				}	
