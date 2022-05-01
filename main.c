@@ -6,6 +6,8 @@
 // Starting from:
 // http://www.hobbytronics.co.uk/rotary-encoder-tutorial
 // Modified by James Newton at MassMind org
+// Testing by Jim Fongjm_fong@yahoo.com
+// Possible DRO testing by robertgeo4@charter.net
 // [X] Modify to use RC3, P1D as the output.
 // [X] Modify to use RA0 / RA5
 // [X] Test / debug at low speed (throttle encoder)
@@ -39,6 +41,13 @@
 //  EEPROM Version '4'
 // [X] 0.96 BugFix: 10 display digits exceeded precision. 9 works.
 // [X] 0.96 BugFix: Avoid PIDerror changing during calculations.
+// [x] 0.96 Periodic error output in reverse HEX. E.g. 15 is +F00000.
+//  "TEll" 7311w turns it on, "lESS" 1355w off.
+// [X] 0.96 Add 'r' command to report error
+// [ ] 0.96 Error output in standard hex.
+// [ ] RC PWM: 100Hz PWM with zero at 1.5mS, reverse at 1mS
+//  and forward at 2mS) so we can support ESC's for BLDC motors. 
+// [ ] RC Servo signal input
 // [ ] Faster!! Switch to assembly jump table in decoder?
 // [ ] Recover position via index pulse if available??
 // [ ] Support digital modes with AS brand encoders???
@@ -47,7 +56,7 @@
 //     Problem with LCD interface: We don't control X DIR input
 //      which is also used by LCD as a data line.
 // [ ] Add demo mode
-// [ ] Add autotune mode with status output
+// [ ] Add autotune mode 
 
 #define VERSION_STRING "0.96"
 #define veloc
@@ -100,6 +109,10 @@
 
 #define DISPLAY_DIGITS 7
 #define DISPLAY_PRECISION 3
+#define EOL 13
+#define SET_CMD 'w'
+
+
 
 #if OSC_FREQ == 16000000L
 // Frequency will be (FOSC/4)/((256-X)*Prescale) in 8 bit mode 
@@ -269,6 +282,7 @@ typedef union {
   unsigned inputEnable:1;
   unsigned neg:1;
   unsigned saved:1;
+  unsigned errout:1;
   };
  unsigned char byte; 
  } T_Flags;
@@ -325,10 +339,15 @@ The switch / case is even worse... C18 doesn't make a jump table.
 		Enc.byte ^= temp.byte; //XOR last reading with this
 		
 		Enc.byte <<= 2;        //and save that 
-//_asm	//C compiler literally multiplies by 4, but this causes encoder errors
-//	RLNCF Enc, 1, 0 //just "Enc" because ASM doesn't know structures
-//	RLNCF Enc, 1, 0 //1=put result back in file register, 0=in access bank
+//_asm	//C compiler literally multiplies by 4, but this is no faster
+//	BCF STATUS,0,ACCESS //clear carry otherwise can rotate in 1's
+//	RLCF Enc, 1, 0 //just "Enc" because ASM doesn't know structures
+//	BCF STATUS,0,ACCESS //clear carry otherwise can rotate in 1's
+//	RLCF Enc, 1, 0 //1=put result back in file register, 0=in access bank
 //_endasm
+// And this won't work because high bits get rotated back in.
+//		Rlncf(Enc, 1, ACCESS); //Not Enc.byte, because the assembler has no union
+//		Rlncf(Enc, 1, ACCESS); //1=save in reg, ACCESS because Enc is near
 		
 		Enc.byte |= temp.byte; //and save this reading.
 
@@ -489,7 +508,7 @@ void ComputePID() {
 /**** OUTPUT PWM ****/
 void SetPWM(unsigned char pwm_width) {
 	// set pwm values
-	// input of 0 to 25 ??? no it isn't... 
+	// input of 0 to 255 ??? no it isn't... 
 	// PWM output is on P1A (pin 5)
 
 	unsigned char pwm_lsb;
@@ -550,6 +569,11 @@ void putchar(char c) {
    	TXREG = c;
 	}
 
+void puts(char *s, unsigned char len) {
+    while (s && *s && len--)
+        putchar (*s++);
+	}
+
 void puts_lit(const rom char *zstr) {
 	while(*zstr) {
 		putchar(*zstr);
@@ -583,7 +607,6 @@ unsigned char d;
     }
   return;
   }
- 
 
 void puts_double( //send floating point numbers to STDOUT
     float f  	//number to display
@@ -610,6 +633,33 @@ unsigned int a;
   return; 
   }
 
+
+//char hexnibble (unsigned char b) {
+//	if (b>9) b+=('A'-10); else b+='0';
+//	return b;
+//	}
+//Nah.. Memory is cheap
+#define hexnibble(b) "0123456789ABCDEF"[b]
+
+void puts_hex(near loctype h) {
+	near char buf[sizeof(loctype)*2+1];
+	near unsigned char i;
+	buf[sizeof(loctype)*2+1]=0; //need a trailing zero to output via puts Thanks Aram!
+	if (0 > h) {
+		putchar('-');
+		h = -h;
+		}
+	else {
+		putchar('+');
+		}
+	for (i = sizeof(loctype)*2-1; i>=0; i--) { //down count is faster
+		buf[i] = hexnibble((unsigned char)h&0xF);
+		h/=16; // easily optimized by most compilers
+		}
+	puts((char*)buf, sizeof(buf)); 
+	//stupid cast to avoid warning from compiler
+	//http://www.microchip.com/forums/m53856.aspx
+	}
 
 void main(void) {
 #if OSC_FREQ == 16000000L
@@ -849,6 +899,14 @@ reconfigure the pin from input to output, as needed." */
 				//PIDerror += val - Setpoint;
 				//Setpoint = val;
 				}
+			else if ('q'==cmd) { //Question. Returns error
+				puts_hex(PIDerror); //pass by value so copy unchanged
+				}	
+//			else if ('t'==cmd) { //Tune (reserved)
+//				}	
+			else if ('z'==cmd) { //zero error
+				PIDerror=0; //We want to be where we are
+				}	
 			else if ('e'==cmd) { //enable motor
 				PIDerror=0; //We want to be where we start
 				Setpoint=vmax; //give a little kick to start
@@ -858,6 +916,7 @@ reconfigure the pin from input to output, as needed." */
 				}
 			else if (' '==cmd || 27==cmd || '!'==cmd) { //disable motor
 				Flags.inputEnable = 0; //don't track input enable
+				Flags.errout = 0; //stop reporting error
 				MOTOR_ENABLE = 0; //Disable the motor
 				ERROR_STATUS = 0; //clear errors.
 				}
@@ -885,7 +944,27 @@ reconfigure the pin from input to output, as needed." */
 				amax=(unsigned int)val;
 				Flags.saved=0;
 				}
-			else if ('w'==cmd && 321==val) { //save parms
+/* The SET_CMD commands
+Current:
+ZIG  	216 	Set direction
+ZAG   	286 	
+GO  	60   	Enable
+SO  	50  	Disable
+BOOT	8007	Reboot
+TELL	7311	Error send
+LESS	1355	No error
+
+Possible:
+
+HELP	4319
+STAT	5747
+TEST	7357
+GAGE	6463
+GAGS	6465
+LOG 	106
+LOT 	107
+*/
+			else if (SET_CMD==cmd && 321==val) { //save parms
 				Flags.saved=1;
 				Write_EEPROM(1,Flags.byte); //Save flags
 				Write_Double_EEPROM(2 + (0*sizeof(double)),PIDkp);
@@ -896,26 +975,37 @@ reconfigure the pin from input to output, as needed." */
 				Write_EEPROM(4 + (3*sizeof(double)),vmax>>8);
 				Write_EEPROM(0,EEPROM_VERSION); //flag the EEPROM
 				}
-			else if ('w'==cmd && 8007==val) { //reset to bootloader
+			else if (SET_CMD==cmd && 8007==val) { //reset to bootloader
 _asm
 	RESET
 _endasm
 				}
-			else if ('w'==cmd && 216==val) { //direction high
+			else if (SET_CMD==cmd && 216==val) { //direction high
 				Flags.dir = 1;
 				Flags.saved=0;
 				}
-			else if ('w'==cmd && 286==val) { //direction low
+			else if (SET_CMD==cmd && 7311==val) { //start continuous error report
+				Flags.errout = 1;
+				Flags.saved=0;
+				}
+			else if (SET_CMD==cmd && 1355==val) { //start continuous error report
+				Flags.errout = 0;
+				Flags.saved=0;
+				}
+			else if (SET_CMD==cmd && 286==val) { //direction low
 				Flags.dir = 0;
 				Flags.saved=0;
 				}
-			else if ('w'==cmd && 50==val) { //So carefull
+			else if (SET_CMD==cmd && 50==val) { //So carefull
 				Flags.inputEnable = 0; //don't track input enable
 				Flags.saved=0;
 				}
-			else if ('w'==cmd && 60==val) { //Go!
+			else if (SET_CMD==cmd && 60==val) { //Go!
 				Flags.inputEnable = 1; //we are enabled if input is
 				Flags.saved=0;
+				}
+			else if ('r'==cmd ) { //Read error
+				puts_hex(PIDerror); //pass by value so copy unchanged
 				}
 			else if ('?'==cmd ) { //Help
 				puts_lit("\r\nMassMind.org BOB P.I.D. v");
@@ -938,6 +1028,7 @@ _endasm
 				puts_lit("v ");
 				puts_lit(Flags.dir?"216w":"286w");
 				puts_lit(Flags.inputEnable?"60w":"50w");
+				puts_lit(Flags.errout?"7311w":"1355w");
 				puts_lit("\r\n");
 				if (!Flags.saved) {
 					puts_lit("321w 2Save\r\n");
@@ -967,14 +1058,22 @@ _endasm
 			}
 		SetPWM(abs(PIDOutput)/OUT_RES_DIV);
 
-		if (MAX_ERROR<abs(PIDerror)) { //error out of control
+		if (MOTOR_ENABLE && MAX_ERROR<abs(PIDerror)) { //error out of control
 			MOTOR_ENABLE=0;
 			ERROR_STATUS = ERROR_ON;
 			puts_lit("\r\nMAX ERROR! Try ");
 			puts_lit(Flags.dir?"286w":"216w"); //try the opposite
 			PIDerror = 0; //clear the error.
 			}
-		if (!timer) ERROR_STATUS=ERROR_OFF;	
+		if (!timer) {
+			ERROR_STATUS=ERROR_OFF;	
+// This method often ends up sending data when the controller isn't ready for it. 
+// better to poll with the 'r' command. 
+			if (Flags.errout) { //need to send error and reset timer
+				puts_hex(PIDerror); //pass by value so copy unchanged
+				timer = SAMPLE_FREQ/5; //(BAUD_RATE/10); 3840 is way to fast.
+				}
+			}
 
 		}
 
