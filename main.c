@@ -643,7 +643,7 @@ unsigned int a;
 
 void puts_hex(near loctype h) {
 	near char buf[sizeof(loctype)*2+1];
-	near unsigned char i;
+	near char i;
 	buf[sizeof(loctype)*2+1]=0; //need a trailing zero to output via puts Thanks Aram!
 	if (0 > h) {
 		putchar('-');
