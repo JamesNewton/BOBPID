@@ -695,7 +695,7 @@ reconfigure the pin from input to output, as needed." */
 	SPBRGH = SPBR/256;
 	SPBRG = SPBR%256;
 	TXSTA = 0  // Transmit Status and Control Register
-		| 0b10000000	// CSRC Clock Source, 1=Master, 0=Slave
+		| 0b10000000	// CSRC Clock Source, 1=Make, 0=Sink
 	//	| 0b01000000	// TX9 9-bit xmit. 1=9, 0=8 bits transmitted
 	//	| 0b00000001	// TX9D Ninth bit of data in 9 bit mode.
 		| 0b00100000	// TXEN Transmit enabled
@@ -1068,7 +1068,7 @@ _endasm
 		if (!timer) {
 			ERROR_STATUS=ERROR_OFF;	
 // This method often ends up sending data when the controller isn't ready for it. 
-// better to poll with the 'r' command. 
+// better to poll with the 'r' command. TODO: Add hardware or software handshake?
 			if (Flags.errout) { //need to send error and reset timer
 				puts_hex(PIDerror); //pass by value so copy unchanged
 				timer = SAMPLE_FREQ/5; //(BAUD_RATE/10); 3840 is way to fast.
