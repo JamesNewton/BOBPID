@@ -7,7 +7,7 @@ The output is PWM speed and direction which will drive most any standard H-Bridg
 
 Instructions, PCB, kit, etc... all at:
 
-http://techref.massmind.org/techref/io/servo/BOBPID.htm
+https://massmind.org/techref/io/servo/BOBPID.htm
 
 Quick video of it running from a 3D printer RAMPS/Marlin controller:
 - https://www.youtube.com/watch?v=rnwYqGB3bXw Using a home made driver ~1hp.
